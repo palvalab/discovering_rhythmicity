@@ -195,8 +195,15 @@ def corr_along_axis(x, y, axis=0, ddof=1):
     return cov_values / div
 
 
-def moving_average_fast(x, window_size):
-    xp = get_module(x)
+def moving_average_fast(x, window_size, res_buf=None, cumsum_buf=None):
+    xp = cp.get_array_module(x)
+
+    # if xp is cp:
+    #     window = (cp.ones((1, window_size))/window_size).astype(x.dtype)
+    #     return cp_sig.convolve2d(x, window, mode='same')
+    # else:
+    #     window = np.ones((1, window_size))/window_size
+    #     return sp.signal.convolve2d(x, window, mode='same').get()
 
     is_odd = (window_size % 2) == 1
     w_half = window_size // 2
@@ -213,15 +220,27 @@ def moving_average_fast(x, window_size):
         tail_end += 1
         end -= 1
 
-    res = xp.zeros_like(x)
+    # res = xp.zeros_like(x)
+    if res_buf is None:
+        res = xp.empty_like(x)
+    else:
+        res = res_buf
 
-    x_cumsum = xp.cumsum(x, axis=-1)
+    if cumsum_buf is None:
+        x_cumsum = xp.empty_like(x)
+    else:
+        x_cumsum = cumsum_buf
 
-    res[..., start:end] = (x_cumsum[..., tail_size:] - x_cumsum[..., :-tail_size])/window_size
+    xp.cumsum(x, axis=-1, out=x_cumsum)
+
+    cp.subtract(x_cumsum[..., tail_size:], x_cumsum[..., :-tail_size], out=res[..., start:end])
 
     # fill head & tail
-    res[..., :w_half+1] = x_cumsum[..., tail_start:tail_size]/window_size
-    res[..., -w_half:] = (x_cumsum[..., ~0:] - x_cumsum[..., tail_end:-w_half-1])/window_size
+    res[..., :w_half+1] = x_cumsum[..., tail_start:tail_size]
+
+    cp.subtract(x_cumsum[..., ~0:], x_cumsum[..., tail_end:-w_half-1], out=res[..., -w_half:])
+
+    res /= window_size
     
     return res
 
@@ -305,7 +324,7 @@ def compute_pac_plv_sens(cohort_pac_values, cohort_cplv_values, cohort_ref_masks
     return res_sens, res_spec
 
 
-def bootstrap_pac_plv_sens(cohort_pac_values, cohort_cplv_values, cohort_ref_masks, noise_level, plv_surr_level, n_rounds=100, n_jobs=32, temp_folder=None):
+def bootstrap_pac_plv_sens(cohort_pac_values, cohort_cplv_values, cohort_ref_masks, noise_level, plv_surr_level, n_rounds=100, n_jobs=32, temp_folder=None, return_sens=True):
     def _boot_func():
         round_indices = np.random.choice(indices, len(indices))
 
@@ -326,7 +345,10 @@ def bootstrap_pac_plv_sens(cohort_pac_values, cohort_cplv_values, cohort_ref_mas
 
     res_sens, res_spec = np.array(round_values).transpose(1,0,2)
 
-    return res_sens
+    if return_sens:
+        return res_sens
+    else:
+        return res_spec
 
 
 def compute_subject_binned_plv(cplv_values, pac_values, ref_mask, bins):
@@ -578,3 +600,48 @@ def compute_null_correlation_jk(x, y, n_rounds=1000, corr_func='pearsons'):
         res[i] = round_vals
         
     return res
+
+def compute_surr_freq_correlation(values, n_rounds=100):
+    values_shuf = values.T.copy()
+
+    res = np.zeros((n_rounds, values.shape[1], values.shape[1]))
+
+    for i in range(n_rounds):
+        for j in range(values.shape[1]):
+            np.random.shuffle(values_shuf[j])
+        
+        res[i] = sp.spatial.distance.squareform(sp.spatial.distance.pdist(values_shuf, metric=lambda *args: nanpearson(*args)[0]))
+
+    return res
+
+def compute_surr_cohort_diff(x, y, n_rounds=100):
+    res = np.zeros((n_rounds, *x.shape[1:]))
+
+    for i in np.arange(n_rounds):
+        for j in range(x.shape[0]):
+            if np.random.random() > 0.5:
+                res[i] += x[j]
+                res[i] -= y[j]
+            else:
+                res[i] -= x[j]
+                res[i] += y[j]
+        
+        res[i] /= x.shape[0]
+
+    return res
+
+def jk_pacf_diff_sign(pacf_diff, surr_level_parcelwise):
+    subject_mask = np.ones(pacf_diff.shape[0], dtype=bool)
+    subject_mask[0] = False
+
+    res_pos = np.zeros_like(pacf_diff)
+    res_neg = np.zeros_like(pacf_diff)
+
+    for i in range(pacf_diff.shape[0]):
+        res_pos[i] = (pacf_diff[subject_mask].mean(axis=0) >= surr_level_parcelwise)
+        res_neg[i] = (pacf_diff[subject_mask].mean(axis=0) <= -surr_level_parcelwise)
+ 
+
+        subject_mask = np.roll(subject_mask, 1)
+
+    return res_pos, res_neg

@@ -24,7 +24,7 @@ import pickle
 
 import re
 
-from bids import BIDSLayout
+# from bids import BIDSLayout
 
 from scipy.optimize import curve_fit
 
@@ -188,7 +188,7 @@ def main():
         data_ref = make_bipolar(data_filename, montage_filename)
         noise = create_noise(data_ref)
         
-        sfreq = data.info['sfreq']
+        sfreq = data_ref.info['sfreq']
         cutoff_samples = int(sfreq*cutoff_secs)
 
         pac_joblib = Parallel(n_jobs=2)(delayed(process_multiple_frequencies)(data_ref._data[:, cutoff_samples:], noise._data, job_freqs, lags_cycles, sfreq, cuda_idx) for
